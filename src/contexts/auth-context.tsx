@@ -11,10 +11,7 @@ import {
   type User,
 } from "firebase/auth";
 import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
-import { useServerFn } from "@tanstack/react-start";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-
-import { getFirebaseConfig } from "@/lib/firebase.functions";
 import { auth, db, initializeFirebase } from "@/lib/firebase";
 import { logSecurityEvent } from "@/lib/security-logger";
 import {
@@ -97,7 +94,6 @@ async function loadProfile(uid: string): Promise<UserProfile | null> {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const fetchFirebaseConfig = useServerFn(getFirebaseConfig);
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(() => {
     try {
@@ -147,27 +143,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     };
 
-    // 1. Try initializing immediately using client-compiled VITE_FIREBASE_* variables
-    void initializeFirebase().then((immediateReady) => {
-      if (!active) return;
-      if (immediateReady) {
-        setupAuth(true);
-      } else {
-        // 2. Fall back to server function if client variables were not present at build time
-        void fetchFirebaseConfig()
-          .then(async (config) => {
-            const ready = await initializeFirebase(config);
-            if (!active) return;
-            setupAuth(ready);
-          })
-          .catch(() => {
-            if (active) {
-              setConfigured(false);
-              setLoading(false);
-            }
-          });
-      }
-    });
+    // Direct, canonical client initialization from import.meta.env.VITE_FIREBASE_*
+    void initializeFirebase()
+      .then((ready) => {
+        if (!active) return;
+        setupAuth(ready);
+      })
+      .catch((err) => {
+        if (active) {
+          console.error("[AuthProvider] Firebase initialization error:", err);
+          setConfigured(false);
+          setLoading(false);
+        }
+      });
 
     return () => {
       active = false;
@@ -175,7 +163,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         unsubscribe();
       }
     };
-  }, [fetchFirebaseConfig]);
+  }, []);
 
   const value = useMemo<AuthContextValue>(
     () => ({
