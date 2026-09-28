@@ -1,0 +1,202 @@
+rules_version = '2';
+
+// ChessMind Firestore Security Rules
+// Publish in Firebase Console -> Firestore Database -> Rules (or `firebase deploy --only firestore:rules`).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    // Fields that changed in this write.
+    function changed() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // ---------------------------------------------------------------
+    // usernames/{normalizedUsername} — Unique username reservations
+    // ---------------------------------------------------------------
+    match /usernames/{normalizedUsername} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.resource.data.uid == uid()
+        && request.resource.data.username is string;
+      allow update: if signedIn()
+        && resource.data.uid == uid()
+        && request.resource.data.uid == uid()
+        && request.resource.data.username is string;
+      allow delete: if signedIn()
+        && resource.data.uid == uid();
+    }
+
+    // ---------------------------------------------------------------
+    // users/{userId}
+    // ---------------------------------------------------------------
+    match /users/{userId} {
+      // Public profile info (username, rating, record) is readable by anyone
+      // so opponents, guests, and the leaderboard can render.
+      allow read: if true;
+
+      // A user creates only their own document, with their own identity and
+      // the fixed starting stats. Nothing else may be seeded client-side.
+      allow create: if signedIn()
+        && userId == uid()
+        && request.resource.data.uid == uid()
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.rating == 1200
+        && request.resource.data.gamesPlayed == 0
+        && request.resource.data.wins == 0
+        && request.resource.data.losses == 0
+        && request.resource.data.draws == 0
+        && request.resource.data.username is string
+        && request.resource.data.username.size() >= 3
+        && request.resource.data.username.size() <= 24;
+
+      // A user edits only their own profile, and only cosmetic fields.
+      // Rating and statistics are NOT writable from the client.
+      allow update: if signedIn()
+        && userId == uid()
+        && changed().hasOnly(['username', 'photoURL', 'avatarId'])
+        && (!('username' in request.resource.data)
+            || (request.resource.data.username is string
+                && request.resource.data.username.size() >= 3
+                && request.resource.data.username.size() <= 24));
+
+      allow delete: if false;
+
+      // User preferences subcollection — owner read & write only
+      match /settings/preferences {
+        allow read: if signedIn() && userId == uid();
+        allow write: if signedIn() && userId == uid();
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // games/{gameId}
+    // ---------------------------------------------------------------
+    match /games/{gameId} {
+
+      function seatUid(seat) {
+        return resource.data[seat] == null ? null : resource.data[seat].uid;
+      }
+
+      function isPlayer() {
+        return signedIn() && (seatUid('white') == uid() || seatUid('black') == uid());
+      }
+
+      // Participants can always read. A game still waiting for an opponent is
+      // readable by any signed-in user so an invite link can be opened and
+      // joined; once both seats are filled only the two players can read it.
+      allow read: if isPlayer() || (signedIn() && resource.data.status == 'waiting');
+
+      // Creator seats themself on one side only, with a clean starting state.
+      allow create: if signedIn()
+        && request.resource.data.createdBy == uid()
+        && request.resource.data.status == 'waiting'
+        && request.resource.data.result == null
+        && request.resource.data.fen is string
+        && request.resource.data.moves.size() == 0
+        && (
+             (request.resource.data.white != null && request.resource.data.white.uid == uid()
+              && request.resource.data.black == null)
+             ||
+             (request.resource.data.black != null && request.resource.data.black.uid == uid()
+              && request.resource.data.white == null)
+           );
+
+      // Joining: a second signed-in user takes the one empty seat as themself.
+      // Identity of the seated creator, the time control and the start
+      // position cannot be touched.
+      allow update: if signedIn()
+        && resource.data.status == 'waiting'
+        && !isPlayer()
+        && changed().hasOnly(['white', 'black', 'status', 'lastMoveAt'])
+        && request.resource.data.status == 'active'
+        && (
+             (resource.data.white == null
+              && request.resource.data.white.uid == uid()
+              && request.resource.data.black == resource.data.black)
+             ||
+             (resource.data.black == null
+              && request.resource.data.black.uid == uid()
+              && request.resource.data.white == resource.data.white)
+           );
+
+      // Cancelling: the host withdraws their own invite while it is still
+      // waiting. Nothing but the status may change.
+      allow update: if isPlayer()
+        && resource.data.status == 'waiting'
+        && resource.data.createdBy == uid()
+        && changed().hasOnly(['status'])
+        && request.resource.data.status == 'cancelled';
+
+      // Playing: only the two seated players, only while the game is live,
+      // and only game-state fields. Player identities, the time control and
+      // the creator are frozen. A finished game can never be rewritten.
+      allow update: if isPlayer()
+        && resource.data.status == 'active'
+        && resource.data.result == null
+        && changed().hasOnly([
+             'fen', 'turn', 'moves', 'lastMove',
+             'whiteTimeMs', 'blackTimeMs', 'lastMoveAt',
+             'drawOffer', 'result', 'status', 'presence'
+           ])
+        && request.resource.data.white == resource.data.white
+        && request.resource.data.black == resource.data.black
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.baseMs == resource.data.baseMs
+        && request.resource.data.incrementMs == resource.data.incrementMs
+        && request.resource.data.timeControlId == resource.data.timeControlId
+        && request.resource.data.status in ['active', 'finished'];
+
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // ratings/{userId}/history/{recordId} — Elo audit trail.
+    // Written ONLY by trusted server code (the service account bypasses these
+    // rules). The client can read its own history and never write anything.
+    // ---------------------------------------------------------------
+    match /ratings/{userId} {
+      allow read: if signedIn();
+      allow write: if false;
+
+      match /history/{recordId} {
+        allow read: if signedIn() && userId == uid();
+        allow write: if false;
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // matchmaking/{userId} — one queue entry per user, keyed by uid.
+    // ---------------------------------------------------------------
+    match /matchmaking/{userId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && userId == uid()
+        && request.resource.data.uid == uid();
+      allow update: if signedIn()
+        && userId == uid()
+        && request.resource.data.uid == uid();
+      allow delete: if signedIn() && userId == uid();
+    }
+
+    // ---------------------------------------------------------------
+    // learningProgress/{userId} — Learn Chess progress, owner only.
+    // ---------------------------------------------------------------
+    match /learningProgress/{userId} {
+      allow read: if signedIn() && userId == uid();
+      allow write: if signedIn() && userId == uid();
+    }
+
+    // Everything else is denied.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
