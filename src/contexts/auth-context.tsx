@@ -50,7 +50,11 @@ type AuthContextValue = {
   resetPassword: (email: string) => Promise<void>;
   resendVerificationEmail: () => Promise<void>;
   /** Only the cosmetic fields the security rules allow a user to change. */
-  updateAccount: (changes: { username?: string; avatarId?: string; photoURL?: string | null }) => Promise<void>;
+  updateAccount: (changes: {
+    username?: string;
+    avatarId?: string;
+    photoURL?: string | null;
+  }) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -109,46 +113,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let unsubscribe: (() => void) | undefined;
     let active = true;
 
-    void fetchFirebaseConfig()
-      .then(async (config) => {
-        const ready = await initializeFirebase(config);
+    const setupAuth = (ready: boolean) => {
+      if (!active) return;
+      setConfigured(ready);
+      if (!ready || !auth) {
+        setLoading(false);
+        return;
+      }
+      if (unsubscribe) return;
+      unsubscribe = onAuthStateChanged(auth, (nextUser) => {
         if (!active) return;
-        setConfigured(ready);
-        if (!ready || !auth) {
-          setLoading(false);
-          return;
+        setUser(nextUser);
+        if (nextUser) {
+          try {
+            const cached = localStorage.getItem(`chess_profile_${nextUser.uid}`);
+            if (cached) {
+              setProfile(JSON.parse(cached));
+            }
+          } catch {}
         }
-        unsubscribe = onAuthStateChanged(auth, (nextUser) => {
-          if (!active) return;
-          setUser(nextUser);
-          if (nextUser) {
-            try {
-              const cached = localStorage.getItem(`chess_profile_${nextUser.uid}`);
-              if (cached) {
-                setProfile(JSON.parse(cached));
-              }
-            } catch {}
-          }
-          // Never block the session check on profile read
-          setLoading(false);
-          if (nextUser && db) {
-            void loadProfile(nextUser.uid).then((next) => {
-              if (active && next) {
-                setProfile(next);
-                try {
-                  localStorage.setItem("chess_active_profile", JSON.stringify(next));
-                } catch {}
-              }
-            });
-          }
-        });
-      })
-      .catch(() => {
-        if (active) {
-          setConfigured(false);
-          setLoading(false);
+        // Never block the session check on profile read
+        setLoading(false);
+        if (nextUser && db) {
+          void loadProfile(nextUser.uid).then((next) => {
+            if (active && next) {
+              setProfile(next);
+              try {
+                localStorage.setItem("chess_active_profile", JSON.stringify(next));
+              } catch {}
+            }
+          });
         }
       });
+    };
+
+    // 1. Try initializing immediately using client-compiled VITE_FIREBASE_* variables
+    void initializeFirebase().then((immediateReady) => {
+      if (!active) return;
+      if (immediateReady) {
+        setupAuth(true);
+      } else {
+        // 2. Fall back to server function if client variables were not present at build time
+        void fetchFirebaseConfig()
+          .then(async (config) => {
+            const ready = await initializeFirebase(config);
+            if (!active) return;
+            setupAuth(ready);
+          })
+          .catch(() => {
+            if (active) {
+              setConfigured(false);
+              setLoading(false);
+            }
+          });
+      }
+    });
 
     return () => {
       active = false;
@@ -181,7 +200,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           await registerUserWithUniqueUsername(db, cred.user.uid, username, email, "avatar-01");
           await updateProfile(cred.user, { displayName: username.trim(), photoURL: "avatar-01" });
-          
+
           // Send Firebase Email Verification
           try {
             await sendEmailVerification(cred.user);
@@ -270,10 +289,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
 
             const avatarId = "avatar-01";
-            await registerUserWithUniqueUsername(db, user.uid, candidate, user.email || "", avatarId);
+            await registerUserWithUniqueUsername(
+              db,
+              user.uid,
+              candidate,
+              user.email || "",
+              avatarId,
+            );
             await updateProfile(user, { displayName: candidate, photoURL: avatarId });
 
-            logSecurityEvent("AUTH_REGISTER", { uid: user.uid, email: user.email || "", provider: "google.com" });
+            logSecurityEvent("AUTH_REGISTER", {
+              uid: user.uid,
+              email: user.email || "",
+              provider: "google.com",
+            });
 
             const newProfile: UserProfile = {
               uid: user.uid,
@@ -293,7 +322,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               localStorage.setItem("chess_active_profile", JSON.stringify(newProfile));
             } catch {}
           } else {
-            logSecurityEvent("AUTH_LOGIN_SUCCESS", { uid: user.uid, email: user.email || "", provider: "google.com" });
+            logSecurityEvent("AUTH_LOGIN_SUCCESS", {
+              uid: user.uid,
+              email: user.email || "",
+              provider: "google.com",
+            });
             const existingProfile = await loadProfile(user.uid);
             if (existingProfile) {
               setProfile(existingProfile);
@@ -301,7 +334,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
           if (auth.currentUser) setUser(auth.currentUser);
         } catch (err) {
-          logSecurityEvent("AUTH_LOGIN_FAILURE", { reason: (err as Error)?.message, provider: "google.com" });
+          logSecurityEvent("AUTH_LOGIN_FAILURE", {
+            reason: (err as Error)?.message,
+            provider: "google.com",
+          });
           throw err;
         }
       },
@@ -322,7 +358,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       resendVerificationEmail: async () => {
         if (!auth?.currentUser) throw new Error("No user is currently signed in.");
         await sendEmailVerification(auth.currentUser);
-        logSecurityEvent("AUTH_EMAIL_VERIFICATION_SENT", { uid: auth.currentUser.uid, email: auth.currentUser.email || "" });
+        logSecurityEvent("AUTH_EMAIL_VERIFICATION_SENT", {
+          uid: auth.currentUser.uid,
+          email: auth.currentUser.email || "",
+        });
       },
       updateAccount: async ({ username, avatarId, photoURL }) => {
         const uid = auth?.currentUser?.uid || profile?.uid || "demo_user";
@@ -356,7 +395,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } catch {}
 
         if (db) {
-          if (auth?.currentUser && username !== undefined && normalizeUsername(username) !== normalizeUsername(currentUsername)) {
+          if (
+            auth?.currentUser &&
+            username !== undefined &&
+            normalizeUsername(username) !== normalizeUsername(currentUsername)
+          ) {
             await updateUsernameWithReservation(
               db,
               uid,
@@ -375,7 +418,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
 
           if (auth?.currentUser) {
-            await updateProfile(auth.currentUser, { displayName: finalDisplayName, photoURL: selectedAvatarId });
+            await updateProfile(auth.currentUser, {
+              displayName: finalDisplayName,
+              photoURL: selectedAvatarId,
+            });
             setUser({ ...auth.currentUser });
           }
         }

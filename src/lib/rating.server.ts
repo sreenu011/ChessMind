@@ -33,8 +33,7 @@ function serviceAccount(): ServiceAccount | null {
 }
 
 function base64url(input: ArrayBuffer | string): string {
-  const bytes =
-    typeof input === "string" ? new TextEncoder().encode(input) : new Uint8Array(input);
+  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : new Uint8Array(input);
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -97,7 +96,7 @@ async function accessToken(account: ServiceAccount): Promise<string> {
 
 /** Confirms the caller really is the Firebase user they claim to be. */
 async function verifyIdToken(idToken: string): Promise<string> {
-  const apiKey = process.env["GOOGLE_API_KEY"];
+  const apiKey = process.env["VITE_FIREBASE_API_KEY"] || process.env["GOOGLE_API_KEY"];
   if (!apiKey) throw new Error("Server is missing the Firebase API key.");
   const response = await fetch(
     `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`,
@@ -180,10 +179,7 @@ export type RatingOutcome = {
  * is stamped `rated: true` in the same atomic commit, and a second call for the
  * same game is a no-op.
  */
-export async function applyRatedResult(
-  idToken: string,
-  gameId: string,
-): Promise<RatingOutcome> {
+export async function applyRatedResult(idToken: string, gameId: string): Promise<RatingOutcome> {
   const account = serviceAccount();
   if (!account) {
     return {
@@ -209,8 +205,7 @@ export async function applyRatedResult(
   const black = readMap(g["black"]);
   const whiteUid = readString(white?.["uid"]);
   const blackUid = readString(black?.["uid"]);
-  if (!whiteUid || !blackUid)
-    return { applied: false, reason: "This game never had two players." };
+  if (!whiteUid || !blackUid) return { applied: false, reason: "This game never had two players." };
   if (callerUid !== whiteUid && callerUid !== blackUid)
     return { applied: false, reason: "Only the players of a game can submit its result." };
 
