@@ -12,5 +12,10 @@ export const getFirebaseConfig = createServerFn({ method: "GET" }).handler(async
       "",
     vercelEnv: process.env["VERCEL_ENV"] ?? process.env["NODE_ENV"] ?? "",
     availableKeys: matchingKeys,
+    keyLengths: matchingKeys.map((k) => ({
+      key: k,
+      len: process.env[k]?.length,
+      type: typeof process.env[k],
+    })),
   };
 });
